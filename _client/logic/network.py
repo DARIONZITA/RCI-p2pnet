@@ -5,6 +5,13 @@ from logic import transport
 from typing import List
 import time
 
+def get_neighbor_seqnumber(peer, socket_fd):
+    """Retorna o seqnumber do neighbor associado ao socket_fd, ou None se não encontrado"""
+    for neighbor in peer.internal_neighbors + peer.external_neighbors:
+        if neighbor.socket_fd == socket_fd:
+            return neighbor.seqnumber
+    return None
+
 def handle_udp_response(peer, message: str):
     """Processa respostas UDP do servidor (SQN, LST, OK, NOK)"""
    
@@ -69,6 +76,8 @@ def handle_udp_response(peer, message: str):
         # Ordenar por seqnumber (preferir menores)
         eligible_peers.sort(key=lambda x: x[2])
         peer.eligible_peers += eligible_peers
+        #eligible_peers remover duplicados
+        peer.eligible_peers = list(set(peer.eligible_peers))
         print(f"[UDP] Vizinhos elegíveis para conexão: {peer.eligible_peers}")
         
         # Conectar aos peers elegíveis - usar FRC apenas uma vez durante recovery
@@ -81,7 +90,22 @@ def handle_udp_response(peer, message: str):
                 print(f"[UDP] Usando FRC para {ip}:{port} (primeira tentativa de recovery)")
                 peer.frc_used_in_recovery = True
                 frc_used = True
-            transport.connect_to_peer(peer, ip, port, seq, use_frc=use_frc)
+            # Não tentar conectar se o candidato foi marcado como falhado recentemente
+            now = time.time()
+            candidate_key = (ip, port, seq)
+            failed_time = peer.failed_candidates.get(candidate_key)
+            if failed_time and (now - failed_time) < peer.failed_candidate_ttl:
+                print(f"[UDP] Ignorando {ip}:{port} devido a backoff (falha recente)")
+                continue
+            new_socket = transport.connect_to_peer(peer, ip, port, seq, use_frc=use_frc)
+            if new_socket is None:
+                print(f"[UDP] Falha ao conectar a {ip}:{port}. Marcando como falhado por {peer.failed_candidate_ttl}s.")
+                peer.failed_candidates[candidate_key] = now
+                # remover da eligible_peers para não insistir imediatamente
+                try:
+                    peer.eligible_peers.remove((ip, port, seq))
+                except ValueError:
+                    pass
         
     elif cmd == "OK":
         print("[UDP] Operação confirmada pelo servidor")
@@ -95,8 +119,9 @@ def handle_udp_response(peer, message: str):
 
 def handle_tcp_link_message(peer, args: List[str], socketPeer, is_frc=False):
     """Processa mensagens TCP de ligação (LNK ou FRC)"""
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[TCP {'FRC' if is_frc else 'LNK'}] {args} in ip/port {remote_ip}:{remote_port}")
+    # Não confiar no getpeername() para o ip:port do vizinho interno (pode ser ephemeral)
+    # para mensagens LNK/FRC tratadas como ligações internas preferimos usar apenas o seqnumber
+    remote_ip, remote_port = (None, 0)
     
     if len(args) < 1:
         print(f"[TCP] Erro: comando sem seqnumber")
@@ -110,6 +135,8 @@ def handle_tcp_link_message(peer, args: List[str], socketPeer, is_frc=False):
         socketPeer.close()
         return
     
+    print(f"[TCP {'FRC' if is_frc else 'LNK'}] seq={peer_seqnumber}")
+    
     # Validar que peer_seqnumber < meu_seqnumber (regra do protocolo)
     if peer_seqnumber >= peer.getSeqnumber():
         print(f"[TCP] Rejeição: seqnumber {peer_seqnumber} >= meu seqnumber {peer.getSeqnumber()}")
@@ -122,8 +149,8 @@ def handle_tcp_link_message(peer, args: List[str], socketPeer, is_frc=False):
         socketPeer.close()
         return
     
-    # Criar objeto Neighbor
-    neigh = Neighbor(remote_ip, remote_port, peer_seqnumber, socketPeer, "pendente")
+    # Criar objeto Neighbor (interno não mantém ip/port de escuta)
+    neigh = Neighbor(None, 0, peer_seqnumber, socketPeer, "pendente")
     
     # Tentar adicionar como vizinho interno
     result, replaced_neighbor = peer.add_internal_neighbor(neigh, isFrc=is_frc)
@@ -132,12 +159,12 @@ def handle_tcp_link_message(peer, args: List[str], socketPeer, is_frc=False):
         # Confirmar conexão
         peer.queue_tcp_message(socketPeer, "CNF\n")
         neigh.status = "ativo"
-        print(f"[TCP] Conexão aceita de {remote_ip}:{remote_port}")
+        print(f"[TCP] Conexão aceita de seq={peer_seqnumber}")
         
         if result == NeighborAddResult.ACCEPT_WITH_REPLACEMENT and replaced_neighbor:
             # Fechar conexão com vizinho substituído
             if replaced_neighbor.socket_fd:
-                print(f"[TCP] Fechando conexão com vizinho substituído {replaced_neighbor.ip}:{replaced_neighbor.port}")
+                print(f"[TCP] Fechando conexão com vizinho substituído seq={replaced_neighbor.seqnumber}")
                 peer.handle_disconnection(replaced_neighbor.socket_fd)
     else:
         # Rejeitar conexão
@@ -147,8 +174,11 @@ def handle_tcp_link_message(peer, args: List[str], socketPeer, is_frc=False):
 
 def handle_tcp_query_message(peer, args: List[str], socketPeer):
     """Processa mensagens TCP de query"""
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[TCP Query] {args} in ip/port {remote_ip}:{remote_port}")
+    seqnumber = get_neighbor_seqnumber(peer, socketPeer)
+    if seqnumber is None:
+        print("[TCP Query] Vizinho não encontrado")
+        return
+    print(f"[TCP Query] {args} de seq={seqnumber}")
     identifier = args[0]
     hopcount = int(args[1])
     
@@ -189,8 +219,11 @@ def handle_tcp_query_message(peer, args: List[str], socketPeer):
 
 def handle_tcp_notfnd_message(peer, args: List[str], socketPeer):
     """Processa mensagens TCP de nao encontrado"""
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[TCP NotFound] {args} in ip/port {remote_ip}:{remote_port}")
+    seqnumber = get_neighbor_seqnumber(peer, socketPeer)
+    if seqnumber is None:
+        print("[TCP NotFound] Vizinho não encontrado")
+        return
+    print(f"[TCP NotFound] {args} de seq={seqnumber}")
     identifier = args[0]
     
     if identifier in peer.active_queries:
@@ -210,8 +243,11 @@ def handle_tcp_notfnd_message(peer, args: List[str], socketPeer):
 
 def handle_tcp_fnd_message(peer, args: List[str], socketPeer):
     """Processa mensagens TCP de encontrado"""
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[TCP Found] {args} in ip/port {remote_ip}:{remote_port}")
+    seqnumber = get_neighbor_seqnumber(peer, socketPeer)
+    if seqnumber is None:
+        print("[TCP Found] Vizinho não encontrado")
+        return
+    print(f"[TCP Found] {args} de seq={seqnumber}")
     identifier = args[0]
     
     if identifier in peer.active_queries:
@@ -238,22 +274,24 @@ def handle_tcp_lnk_message(peer, args: List[str], socketPeer):
         return
     
     remote_seqnumber = int(args[0])
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[LNK] Pedido de ligação de {remote_ip}:{remote_port} (seq={remote_seqnumber})")
+    # Não confiar no getpeername() para o ip:port do vizinho interno (pode ser ephemeral)
+    # Manter apenas seqnumber e socket_fd para vizinhos internos
+    remote_ip, remote_port = (None, 0)
+    print(f"[LNK] Pedido de ligação de seq={remote_seqnumber}")
     
-    # Criar objeto Neighbor
-    neigh = Neighbor(remote_ip, remote_port, remote_seqnumber, socketPeer, "pendente")
+    # Criar objeto Neighbor (interno: ip/port não são relevantes)
+    neigh = Neighbor(None, 0, remote_seqnumber, socketPeer, "pendente")
     
     # Tentar adicionar como vizinho interno
     result, removed_neighbor = peer.add_internal_neighbor(neigh, isFrc=False)
     
     if result == neighbor_manager.NeighborAddResult.ACCEPT or result == neighbor_manager.NeighborAddResult.ALREADY_NEIGHBOR:
         # Aceitar ligação
-        print(f"[LNK] Ligação aceite com {remote_ip}:{remote_port}")
+        print(f"[LNK] Ligação aceite com seq={remote_seqnumber}")
         peer.queue_tcp_message(socketPeer, "CNF\n")
     else:
         # Rejeitar ligação (fechar socket)
-        print(f"[LNK] Ligação rejeitada com {remote_ip}:{remote_port} (tabela cheia)")
+        print(f"[LNK] Ligação rejeitada com seq={remote_seqnumber} (tabela cheia)")
         peer.handle_disconnection(socketPeer)
 
 def handle_tcp_frc_message(peer, args: List[str], socketPeer):
@@ -265,22 +303,24 @@ def handle_tcp_frc_message(peer, args: List[str], socketPeer):
         return
     
     remote_seqnumber = int(args[0])
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[FRC] Pedido FRC de ligação de {remote_ip}:{remote_port} (seq={remote_seqnumber})")
+    # Não confiar no getpeername() para o ip:port do vizinho interno (pode ser ephemeral)
+    # Manter apenas seqnumber e socket_fd para vizinhos internos
+    remote_ip, remote_port = (None, 0)
+    print(f"[FRC] Pedido FRC de ligação de seq={remote_seqnumber}")
     
-    # Criar objeto Neighbor
-    neigh = Neighbor(remote_ip, remote_port, remote_seqnumber, socketPeer, "pendente")
+    # Criar objeto Neighbor (interno: ip/port não são relevantes)
+    neigh = Neighbor(None, 0, remote_seqnumber, socketPeer, "pendente")
     
     # Tentar adicionar como vizinho interno com FRC
     result, removed_neighbor = peer.add_internal_neighbor(neigh, isFrc=True)
     
     if result == neighbor_manager.NeighborAddResult.ACCEPT or result == neighbor_manager.NeighborAddResult.ALREADY_NEIGHBOR:
         # Aceitar ligação
-        print(f"[FRC] Ligação aceite com {remote_ip}:{remote_port}")
+        print(f"[FRC] Ligação aceite com seq={remote_seqnumber}")
         peer.queue_tcp_message(socketPeer, "CNF\n")
     elif result == neighbor_manager.NeighborAddResult.ACCEPT_WITH_REPLACEMENT:
         # Aceitar ligação e expulsar vizinho
-        print(f"[FRC] Ligação aceite com {remote_ip}:{remote_port}, expulsando vizinho seq={removed_neighbor.seqnumber}")
+        print(f"[FRC] Ligação aceite com seq={remote_seqnumber}, expulsando vizinho seq={removed_neighbor.seqnumber}")
         peer.queue_tcp_message(socketPeer, "CNF\n")
         
         # Fechar conexão com o vizinho expulso
@@ -292,22 +332,24 @@ def handle_tcp_frc_message(peer, args: List[str], socketPeer):
                 peer.outputs.remove(removed_neighbor.socket_fd)
     else:
         # Rejeitar ligação
-        print(f"[FRC] Ligação rejeitada com {remote_ip}:{remote_port}")
+        print(f"[FRC] Ligação rejeitada com seq={remote_seqnumber}")
         socketPeer.close()
         if socketPeer in peer.inputs:
             peer.inputs.remove(socketPeer)
 
 def handle_tcp_cnf_message(peer, args: List[str], socketPeer):
     """Processa mensagem CNF (confirmação de ligação)"""
-    remote_ip, remote_port = socketPeer.getpeername()
-    print(f"[CNF] Ligação confirmada com {remote_ip}:{remote_port}")
+    seqnumber = get_neighbor_seqnumber(peer, socketPeer)
+    if seqnumber is None:
+        print("[CNF] Vizinho não encontrado")
+        return
+    print(f"[CNF] Ligação confirmada com peer seq={seqnumber}")
     
     # Marcar vizinho como ativo
     for neighbor in peer.internal_neighbors + peer.external_neighbors:
         if neighbor.socket_fd == socketPeer:
             neighbor.status = "ativo"
-
-            print(f"[CNF] Vizinho {remote_ip}:{remote_port} marcado como ativo")
+            print(f"[CNF] Vizinho seq={seqnumber} marcado como ativo")
             return
 
 def handle_tcp_peer_message(peer, message: str, socketPeer):

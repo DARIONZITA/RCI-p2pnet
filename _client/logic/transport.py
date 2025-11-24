@@ -42,7 +42,7 @@ def accept_incoming_connection(peer, server_socket):
     """Aceita uma nova conexão TCP de entrada e cria um vizinho"""
     try:
         conn, addr = server_socket.accept()
-        print(f"[TCP] Nova conexão de {addr}")
+        print(f"[TCP] Nova conexão de socket de {conn}")
         conn.setblocking(False)
         peer.inputs.append(conn)
         peer.all_messages_to_send[conn] = []  # Inicializa fila de mensagens

@@ -25,11 +25,20 @@ def handle_cli_command(peer, line):
     elif cmd == "search" and args:
         handlers.handle_search(peer, args)
     elif cmd == "exit":
-        # TODO: Melhorar EXIT - William
-        # 1) Chamar handlers.handle_leave(peer, []) para desregistrar primeiro
-        # 2) Aguardar um pouco (time.sleep(0.5)) para mensagens serem enviadas
-        # 3) Fechar sockets principais (peer.client_socket_tcp, peer.client_socket_udp)
-        # 4) Usar sys.exit(0) para encerrar
+        import time
+        print("Encerrando...")
+        # Desregistrar do servidor e limpar vizinhos
+        handlers.handle_leave(peer, [])
+        # Aguardar para mensagens serem enviadas
+        time.sleep(0.5)
+        # Fechar sockets principais
+        if peer.client_socket_tcp:
+            peer.client_socket_tcp.close()
+        if peer.client_socket_udp:
+            peer.client_socket_udp.close()
+        if peer.server_socket_tcp:
+            peer.server_socket_tcp.close()
+        print("Adeus!")
         sys.exit(0)
     else:
         print("Comando não reconhecido")

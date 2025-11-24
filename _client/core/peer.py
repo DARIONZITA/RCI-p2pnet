@@ -7,6 +7,7 @@ from common.models import Neighbor, NeighborAddResult, Identifier, QueryState
 from common.args import Argumentos
 from logic import network, neighbor_manager, transport
 from cli import interface
+import time
 
 class Peer:
     def __init__(self):
@@ -27,6 +28,14 @@ class Peer:
         self.frc_used_in_recovery = False
         self.query_timeouts = {}
         self.last_query_cleanup = 0
+        # Controle de recuperação de vizinhos externos (para evitar loops)
+        self.last_external_peers_request = 0
+        self.external_recovery_min_interval = 5  # segundos entre pedidos PEERS
+        self.external_recovery_attempts = 0
+        self.max_external_recovery_attempts = 3
+        # Controle de candidatos falhados (backoff temporário em candidates de LST)
+        self.failed_candidates = {}  # {(ip,port,seq): timestamp}
+        self.failed_candidate_ttl = 30  # segundos para manter como falhado
 
     def handle_cli_command(self, line):
         interface.handle_cli_command(self, line)
@@ -51,6 +60,13 @@ class Peer:
 
     def add_external_neighbor(self, neigh: Neighbor):
         neighbor_manager.add_external_neighbor(self, neigh)
+        # Ao obter pelo menos um vizinho externo, resetar tentativas de recuperação
+        if self.external_neighbors:
+            self.external_recovery_attempts = 0
+            # Se este peer estava com falhas marcadas, remover do mapa
+            key = (neigh.ip, neigh.port, neigh.seqnumber)
+            if key in self.failed_candidates:
+                del self.failed_candidates[key]
 
     def remove_neighbor_by_seq(self, seqnumber: int) -> Optional[Neighbor]:
         return neighbor_manager.remove_neighbor_by_seq(self, seqnumber)
@@ -107,7 +123,7 @@ class Peer:
             if neighbor.socket_fd == socket_peer:
                 self.internal_neighbors.remove(neighbor)
                 removed_neighbor = neighbor
-                print(f"[Disconnect] Vizinho interno removido: {neighbor.ip}:{neighbor.port}")
+                print(f"[Disconnect] Vizinho interno removido: seq={neighbor.seqnumber}")
                 break
         
         if not removed_neighbor:
@@ -144,10 +160,18 @@ class Peer:
         
         # Verificar se ficamos sem vizinhos externos
         if not self.external_neighbors:
-            print("[Disconnect] Sem vizinhos externos! Solicitando lista de peers...")
-            self.frc_used_in_recovery = False  # Reset FRC flag para próxima recuperação
-            self.send_udp_peers()
-            # A lógica de reconexão será implementada no handler de LST
+            now = time.time()
+            if self.external_recovery_attempts >= self.max_external_recovery_attempts:
+                print("[Disconnect] Limite de tentativas de recuperação atingido. Aguardando conexões de entrada.")
+            elif now - self.last_external_peers_request < self.external_recovery_min_interval:
+                print("[Disconnect] Pedido PEERS já enviado recentemente. Aguardando resposta.")
+            else:
+                print("[Disconnect] Sem vizinhos externos! Solicitando lista de peers...")
+                self.frc_used_in_recovery = False  # Reset FRC para próxima recuperação
+                self.send_udp_peers()
+                self.last_external_peers_request = now
+                self.external_recovery_attempts += 1
+                # A lógica de reconexão continuará no handler de LST
 
     def start_server_loop(self):
         """Inicia o loop principal do servidor TCP"""

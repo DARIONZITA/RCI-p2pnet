@@ -6,8 +6,9 @@ def add_internal_neighbor(peer, neigh: Neighbor, isFrc: bool=False) -> Tuple[Nei
     Tenta adicionar um vizinho interno seguindo as regras do protocolo P2P.
     """
     # 1. Verificar se já é vizinho interno (evitar duplicados)
+    # Duplicados são identificados por seqnumber ou socket, não por ip/port (ephemeral TCP ports)
     for existing in peer.internal_neighbors:
-        if existing.ip == neigh.ip and existing.port == neigh.port:
+        if existing.seqnumber == neigh.seqnumber or existing.socket_fd == neigh.socket_fd:
             return (NeighborAddResult.ALREADY_NEIGHBOR, None)
     
     # 2. Se há espaço livre, aceitar diretamente
