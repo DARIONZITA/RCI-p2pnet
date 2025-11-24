@@ -24,17 +24,57 @@ def handle_leave(peer, args):
 
 def handle_show_neighbors(peer, args):
     print("Comando SHOW NEIGHBORS recebido")
-    # TODO: Implementar SHOW NEIGHBORS - Bernardo
-    # Explicação simples:
-    # Mostrar para o utilizador quem está ligado ao seu nó. Existem dois tipos de
-    # vizinhos: internos (conexões aceitas por você) e externos (conexões iniciadas
-    # por você). Para cada vizinho mostramos o IP:porta e o número de sequência.
-    # O que chamar / funções úteis:
-    # - Ler `peer.internal_neighbors` e `peer.external_neighbors` (listas de objetos)
-    # - Para cada neighbor: mostrar `neighbor.ip`, `neighbor.port`, `neighbor.seqnumber`
-    # - Opcional: `neighbor.status` se existir (ex: 'ativo' ou 'pendente')
-    # - Mostrar contadores: total, internos e externos e o limite `peer.args.neighMx`
-
+    
+    # Obter os vizinhos internos e externos
+    internal_neighbors = peer.internal_neighbors
+    external_neighbors = peer.external_neighbors
+    
+    # Contadores
+    total_internal = len(internal_neighbors)
+    total_external = len(external_neighbors)
+    total_neighbors = total_internal + total_external
+    max_neighbors = peer.args.neighMx
+    
+    print(f"\n=== VIZINHOS DO NÓ {peer.ip}:{peer.port} ===")
+    print(f"Total: {total_neighbors}/{max_neighbors} (Limite: {max_neighbors})")
+    print(f"Internos: {total_internal} | Externos: {total_external}")
+    print("-" * 60)
+    
+    # Mostrar vizinhos internos
+    if internal_neighbors:
+        print("\nVizinhos Internos (conexões aceitas por você):")
+        print("IP:Porta".ljust(25) + "Nº Sequência".ljust(15) + "Status")
+        print("-" * 50)
+        
+        for i, neighbor in enumerate(internal_neighbors, 1):
+            status = getattr(neighbor, 'status', 'ativo')
+            print(f"{i:2d}. {neighbor.ip}:{neighbor.port}".ljust(25) + 
+                  f"{neighbor.seqnumber}".ljust(15) + 
+                  f"{status}")
+    else:
+        print("\nNenhum vizinho interno.")
+    
+    # Mostrar vizinhos externos
+    if external_neighbors:
+        print("\nVizinhos Externos (conexões iniciadas por você):")
+        print("IP:Porta".ljust(25) + "Nº Sequência".ljust(15) + "Status")
+        print("-" * 50)
+        
+        for i, neighbor in enumerate(external_neighbors, 1):
+            status = getattr(neighbor, 'status', 'ativo')
+            print(f"{i:2d}. {neighbor.ip}:{neighbor.port}".ljust(25) + 
+                  f"{neighbor.seqnumber}".ljust(15) + 
+                  f"{status}")
+    else:
+        print("\nNenhum vizinho externo.")
+    
+    # Informação sobre capacidade
+    if total_neighbors >= max_neighbors:
+        print(f"\n⚠️  ATENÇÃO: Limite máximo de {max_neighbors} vizinhos atingido!")
+    elif total_neighbors == 0:
+        print(f"\n💡 Dica: Use 'CONNECT <ip> <porta>' para adicionar vizinhos.")
+    
+    print()
 def handle_release(peer, args):
     print("Comando RELEASE recebido")
     # TODO: Implementar RELEASE - William
@@ -52,16 +92,34 @@ def handle_release(peer, args):
 
 def handle_post(peer, args):
     print("Comando POST recebido")
-    # TODO: Implementar POST - Bernardo
-    # Explicação simples:
-    # Adiciona um identificador (por exemplo o nome de um ficheiro) à sua lista
-    # local para que outros peers possam encontrá-lo. Não envia nada pela rede;
-    # apenas atualiza o estado local.
-    # O que chamar / funções úteis:
-    # - Verificar `args` e obter `identifier = args[0]`
-    # - `peer.identifiers.hasIdentifier(identifier)` -> retorna True se já tiver
-    # - `peer.identifiers.addIdentifier(identifier)` -> adiciona o identificador
-    # - Mostrar mensagem confirmando a adição ou informando que já existia
+    
+    # Verificar se foi fornecido um identificador
+    if not args:
+        print("❌ Erro: É necessário especificar um identificador.")
+        print("   Uso: POST <identificador>")
+        return
+    
+    # Obter o identificador (pode ser o nome de um ficheiro, por exemplo)
+    identifier = args[0]
+    
+    print(f"📝 Tentativa de adicionar identificador: '{identifier}'")
+    
+    # Verificar se o identificador já existe
+    if peer.identifiers.hasIdentifier(identifier):
+        print(f"ℹ️  O identificador '{identifier}' já existe na lista local.")
+        return
+    
+    # Adicionar o identificador à lista local
+    try:
+        peer.identifiers.addIdentifier(identifier)
+        print(f"✅ Identificador '{identifier}' adicionado com sucesso à lista local.")
+        
+        # Mostrar estatísticas atualizadas (opcional)
+        total_identifiers = len(peer.identifiers.getIdentifiers()) if hasattr(peer.identifiers, 'getIdentifiers') else "N/A"
+        print(f"📊 Total de identificadores na lista local: {total_identifiers}")
+        
+    except Exception as e:
+        print(f"❌ Erro ao adicionar identificador '{identifier}': {e}")
 
 def handle_unpost(peer, args):
     print("Comando UNPOST recebido")
@@ -77,15 +135,36 @@ def handle_unpost(peer, args):
 
 def handle_list_identifiers(peer, args):
     print("Comando LIST IDENTIFIERS recebido")
-    # TODO: Implementar LIST IDENTIFIERS - Bernardo
-    # Explicação simples:
-    # Mostra todos os identificadores que este nó conhece (os que você adicionou
-    # localmente com POST). Serve para confirmar o que está a ser partilhado.
-    # O que chamar / funções úteis:
-    # - `identifiers = peer.identifiers.listIdentifiers()` -> obtém uma lista de strings
-    # - Se a lista estiver vazia: mostrar "Nenhum identificador conhecido"
-    # - Caso contrário, iterar com `enumerate(identifiers, 1)` e imprimir cada um
-    # - Mostrar o total (len(identifiers))
+    
+    # Obter a lista de identificadores
+    try:
+        identifiers = peer.identifiers.listIdentifiers()
+    except AttributeError:
+        print("❌ Erro: Não foi possível aceder à lista de identificadores.")
+        return
+    except Exception as e:
+        print(f"❌ Erro inesperado ao obter identificadores: {e}")
+        return
+    
+    # Verificar se a lista está vazia
+    if not identifiers:
+        print("📭 Nenhum identificador conhecido.")
+        print("💡 Use o comando 'POST <identificador>' para adicionar identificadores.")
+        return
+    
+    # Mostrar a lista de identificadores
+    print(f"\n📋 IDENTIFICADORES CONHECIDOS ({len(identifiers)} total):")
+    print("-" * 50)
+    
+    for i, identifier in enumerate(identifiers, 1):
+        print(f"{i:3d}. {identifier}")
+    
+    print("-" * 50)
+    print(f"📊 Total: {len(identifiers)} identificador(es)")
+    
+    # Informação adicional sobre o estado
+    if hasattr(peer.identifiers, 'hasIdentifier'):
+        print("\n💡 Estes identificadores estão disponíveis para outros peers encontrarem.")
 
 
 
