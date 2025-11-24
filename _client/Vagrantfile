@@ -1,0 +1,49 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "ubuntu/focal64"
+
+  # Desativa atualização automática do Guest Additions (evita erros)
+  config.vbguest.auto_update = false
+
+  # IP fixo da VM (podes mudar .10, .11, .12... para várias VMs)
+  config.vm.network "private_network", ip: "192.168.56.10"
+
+  # Port forwarding TCP apenas para as portas que os peers usam (lnkport)
+  # Exemplo: 58001 até 58020 (dá para testar muitos peers)
+  (58001..58020).each do |port|
+    config.vm.network "forwarded_port", guest: port, host: port, protocol: "tcp"
+  end
+
+  # NÃO uses forwarded_port para a porta UDP 58000
+  # → a VM já chega ao host (192.168.56.21:58000) diretamente pela rede privada
+
+  # Sincroniza a pasta do projecto
+  config.vm.synced_folder ".", "/home/vagrant/p2pnet"
+
+  # Provisionamento (Python 3.8 como o professor quer)
+  config.vm.provision "shell", run: "always", inline: <<-SHELL
+    sudo apt-get update
+    sudo apt-get install -y software-properties-common
+    sudo add-apt-repository -y ppa:deadsnakes/ppa
+    sudo apt-get update
+    sudo apt-get install -y python3.8 python3.8-pip python3.8-dev
+    sudo update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.8 1
+    cd /home/vagrant/p2pnet
+    pip3 install --upgrade pip
+  SHELL
+
+  # Aumenta o timeout de boot para 10 minutos (para dar tempo ao provisionamento)
+  config.vm.boot_timeout = 600
+
+  # Recursos da VM e workaround para o bug de boot no focal64
+  config.vm.provider "virtualbox" do |vb|
+    vb.name = "rc1-p2pnet-vm"   # nome bonito na interface do VirtualBox
+    vb.memory = "1536"
+    vb.cpus = 2
+    # Workaround para o bug de serial port (evita hang no boot)
+    vb.customize ["modifyvm", :id, "--uart1", "0x3F8", "4"]
+    vb.customize ["modifyvm", :id, "--uartmode1", "file", File::NULL]
+  end
+end

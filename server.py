@@ -57,7 +57,7 @@ def processarComando(messageReceived: str, addr: Tuple[str, int]) -> str:
         result: str = "LST\n"
         for peer in peerTable:
             result += f"{peer['ip']}:{peer['lnkport']}#{peer['seqnumber']}\n"
-        result += "\n"  # linha vazia para terminar a lista
+        # Não adicionar quebra de linha extra - o último peer já tem \n
         return result
 
 def signal_handler(signum, frame):
@@ -85,6 +85,7 @@ def start_server():
     signal.signal(signal.SIGTERM, signal_handler)
     
     soc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     port = sys.argv[1] if sys.argv.__len__() > 1 and sys.argv[1].isdigit() else 58000
     #lidar com o erro de porta ocupada
     try:
