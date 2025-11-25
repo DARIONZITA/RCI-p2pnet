@@ -1,8 +1,29 @@
 import sys
+import socket
 from common.models import QueryState
 
 def handle_join(peer, args):
     print("Comando JOIN recebido")
+    # Se o socket de escuta foi fechado pelo `leave`, recriá-lo para aceitar novas ligações
+    try:
+        if not getattr(peer, 'client_socket_tcp', None):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("", peer.args.lnkport))
+            except Exception as e:
+                print(f"Erro ao bindar porta {peer.args.lnkport}: {e}")
+                s.close()
+            else:
+                s.listen(peer.args.neighMx * 2)
+                s.setblocking(False)
+                peer.client_socket_tcp = s
+                if s not in peer.inputs:
+                    peer.inputs.append(s)
+                print(f"Socket de escuta recriado na porta {peer.args.lnkport}")
+    except Exception as e:
+        print(f"Erro ao criar socket de escuta: {e}")
+
     print("Enviando REG ao servidor...")
     peer.send_udp_reg()
     peer.send_udp_peers()
@@ -11,7 +32,24 @@ def handle_leave(peer, args):
     print("Comando LEAVE recebido")
     print("Enviando UNR ao servidor...")
     peer.send_udp_unr(peer.getSeqnumber())
-    
+    # Marcar como não registado localmente (evitar reutilizar seqnumber)
+    try:
+        peer.setSeqnumber(0)
+    except Exception:
+        pass
+
+    # Fechar socket de escuta para não aceitar novas ligações
+    try:
+        if getattr(peer, 'client_socket_tcp', None):
+            if peer.client_socket_tcp in peer.inputs:
+                peer.inputs.remove(peer.client_socket_tcp)
+            if peer.client_socket_tcp in peer.outputs:
+                peer.outputs.remove(peer.client_socket_tcp)
+            peer.client_socket_tcp.close()
+            peer.client_socket_tcp = None
+    except Exception as e:
+        print(f"Erro ao fechar socket de escuta: {e}")
+
     # Fechar todas as conexões TCP com vizinhos
     all_neighbors = peer.internal_neighbors + peer.external_neighbors
     for neighbor in all_neighbors:
@@ -150,7 +188,8 @@ def handle_search(peer, args):
             return
 
         # Criar estado da query local (requester_socket=None)
-        peer.active_queries[identifier] = QueryState(None, identifier, len(peer.internal_neighbors))
+        pending = len(peer.internal_neighbors) + len(peer.external_neighbors)
+        peer.active_queries[identifier] = QueryState(None, identifier, pending)
         
         query = "QRY " + identifier + " " + str(peer.args.hopcount - 1) + "\n"
         for neighbor in peer.internal_neighbors + peer.external_neighbors:

@@ -94,6 +94,7 @@ def start_server():
         print("Porta ocupada")
         sys.exit()
     print("Server UDP started on port", port)
+    print("Ctrl+C para encerrar o servidor")
     soc.settimeout(1.0)  # 1 segundo
     while True:
         try:
